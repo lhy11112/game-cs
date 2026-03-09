@@ -163,6 +163,11 @@ pub struct Player {
     pub round_deaths: u32,
     pub round_assists: u32,
     pub round_damage: f32,
+
+    /// Seconds of blindness remaining from a flashbang
+    pub blind_timer: f32,
+    /// Seconds of fire damage remaining from a molotov (informational)
+    pub on_fire_timer: f32,
 }
 
 impl Player {
@@ -188,6 +193,8 @@ impl Player {
             round_deaths: 0,
             round_assists: 0,
             round_damage: 0.0,
+            blind_timer: 0.0,
+            on_fire_timer: 0.0,
         }
     }
 
@@ -228,6 +235,9 @@ impl Player {
         self.round_deaths = 0;
         self.round_assists = 0;
         self.round_damage = 0.0;
+        self.blind_timer = 0.0;
+        self.on_fire_timer = 0.0;
+        // Preserve inventory across rounds (CS mechanic: keep bought weapons)
     }
 
     pub fn add_money(&mut self, amount: u32, max: u32) {

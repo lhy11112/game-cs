@@ -246,6 +246,18 @@ impl Default for MatchConfig {
     }
 }
 
+/// Summary of a completed round (for round-history display and MVP)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RoundSummary {
+    pub round_number: u32,
+    pub result: RoundResult,
+    /// Player ID of the round MVP
+    pub mvp_id: Option<String>,
+    pub mvp_nickname: Option<String>,
+    pub ct_score: u32,
+    pub t_score: u32,
+}
+
 /// Reward money given at the end of a round
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RoundMoneyRewards {
