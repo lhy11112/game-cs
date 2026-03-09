@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 authors = ["CS Game Team"]
 description = "A CS-style tactical shooter game engine implemented in Rust"
+default-run = "game-cs"
 
 [[bin]]
 name = "game-cs"
