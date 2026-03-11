@@ -37,6 +37,54 @@ use std::{
     time::{Duration, Instant},
 };
 
+// ── Sound engine ──────────────────────────────────────────────────────────────
+// Uses the terminal bell character (\x07) to produce audible feedback.
+// Each event has a distinct beep pattern (count + interval).
+// For full synthesized audio, install libasound2-dev and add the rodio crate.
+struct SoundEngine;
+
+impl SoundEngine {
+    fn try_init() -> Option<Self> { Some(SoundEngine) }
+
+    /// Write n bell characters with an optional delay between them (ms)
+    fn beep_pattern(&self, count: u8, delay_ms: u64) {
+        use std::io::Write;
+        let mut out = std::io::stdout();
+        for i in 0..count {
+            let _ = out.write_all(b"\x07");
+            let _ = out.flush();
+            if i + 1 < count && delay_ms > 0 {
+                std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+            }
+        }
+    }
+
+    fn shoot(&self)        { self.beep_pattern(1, 0); }
+    fn kill_ding(&self)    { self.beep_pattern(2, 80); }  // ding-ding
+    fn headshot(&self)     { self.beep_pattern(3, 50); }  // ding-ding-ding
+    fn buy_ok(&self)       { self.beep_pattern(1, 0); }
+    fn bomb_beep(&self)    { self.beep_pattern(1, 0); }
+    fn bomb_explode(&self) { self.beep_pattern(3, 40); }
+    fn plant_click(&self)  { self.beep_pattern(1, 0); }
+    fn round_win(&self)    { self.beep_pattern(2, 120); }
+    fn round_lose(&self)   { self.beep_pattern(1, 0); }
+}
+
+// ── Minimap world-space constants (de_dust2) ──────────────────────────────────
+const WMAP_MIN_X: f32 = -2300.0;
+const WMAP_MAX_X: f32 =  600.0;
+const WMAP_MIN_Y: f32 =  350.0;
+const WMAP_MAX_Y: f32 = 3250.0;
+
+fn world_to_map(wx: f32, wy: f32, cols: usize, rows: usize) -> (usize, usize) {
+    let c = ((wx - WMAP_MIN_X) / (WMAP_MAX_X - WMAP_MIN_X) * cols as f32)
+        .clamp(0.0, (cols - 1) as f32) as usize;
+    // Flip y: higher world-y appears near top of terminal
+    let r = ((WMAP_MAX_Y - wy) / (WMAP_MAX_Y - WMAP_MIN_Y) * rows as f32)
+        .clamp(0.0, (rows - 1) as f32) as usize;
+    (c, r)
+}
+
 // ── Palette ───────────────────────────────────────────────────────────────────
 const C_BG:     Color = Color::Rgb(10,  12,  16);
 const C_PANEL:  Color = Color::Rgb(20,  24,  32);
@@ -86,6 +134,9 @@ struct PlayApp {
     tick: u64,
     last_frame: Instant,
     scoped: bool,
+    map_view: bool,
+    sound: Option<SoundEngine>,
+    last_bomb_tick: f32, // seconds since last bomb beep
 }
 
 impl PlayApp {
@@ -140,6 +191,9 @@ impl PlayApp {
             tick: 0,
             last_frame: Instant::now(),
             scoped: false,
+            map_view: false,
+            sound: SoundEngine::try_init(),
+            last_bomb_tick: 0.0,
         }
     }
 
@@ -224,7 +278,12 @@ impl PlayApp {
         let mut rng = rand::thread_rng();
         let tid = targets[rng.gen_range(0..targets.len())].clone();
         let hit = rng.gen::<f32>() < 0.72;
-        if !hit { self.add_log("Missed!".into()); return; }
+        if !hit {
+            // Play dry fire / miss sound
+            if let Some(s) = &self.sound { s.shoot(); }
+            self.add_log("Missed!".into());
+            return;
+        }
 
         let (dmg, is_hs, weapon_name) = {
             let p = self.game.players.get(&self.player_id).unwrap();
@@ -245,9 +304,14 @@ impl PlayApp {
             self.add_log(format!("YOU killed {} with {}{}!", victim_name, weapon_name, hs_tag));
             let hz = if is_hs { HitZone::Head } else { HitZone::Chest };
             self.game.record_kill(&self.player_id.clone(), &tid, &weapon_name, hz, is_hs, ts).ok();
+            if let Some(s) = &self.sound {
+                s.shoot();
+                if is_hs { s.headshot(); } else { s.kill_ding(); }
+            }
         } else {
             let hp = self.game.players.get(&tid).map(|p| p.health).unwrap_or(0);
             self.add_log(format!("Hit {} for {:.0} dmg ({} HP left)", victim_name, dmg, hp));
+            if let Some(s) = &self.sound { s.shoot(); }
         }
     }
 
@@ -285,7 +349,10 @@ impl PlayApp {
 
         let pid = self.player_id.clone();
         match self.game.apply_bomb_action(BombAction::StartPlant { player_id: pid, position: site_pos }) {
-            Ok(_) => self.add_log("YOU started planting the bomb...".into()),
+            Ok(_) => {
+                self.add_log("YOU started planting the bomb...".into());
+                if let Some(s) = &self.sound { s.plant_click(); }
+            }
             Err(e) => self.add_log(format!("Plant failed: {}", e)),
         }
     }
@@ -322,7 +389,10 @@ impl PlayApp {
             None => return,
         };
         match self.buy_menu.buy_weapon(player, &wname, phase, 16000) {
-            Ok(_) => self.add_log(format!("Bought {}!", wname)),
+            Ok(_) => {
+                self.add_log(format!("Bought {}!", wname));
+                if let Some(s) = &self.sound { s.buy_ok(); }
+            }
             Err(e) => self.add_log(format!("Buy failed: {}", e)),
         }
     }
@@ -332,7 +402,10 @@ impl PlayApp {
         let pid = self.player_id.clone();
         if let Some(p) = self.game.players.get_mut(&pid) {
             match self.buy_menu.buy_defuse_kit(p, phase) {
-                Ok(_) => self.add_log("Bought Defuse Kit!".into()),
+                Ok(_) => {
+                    self.add_log("Bought Defuse Kit!".into());
+                    if let Some(s) = &self.sound { s.buy_ok(); }
+                }
                 Err(e) => self.add_log(format!("Kit: {}", e)),
             }
         }
@@ -343,7 +416,10 @@ impl PlayApp {
         let pid = self.player_id.clone();
         if let Some(p) = self.game.players.get_mut(&pid) {
             match self.buy_menu.buy_kevlar_helmet(p, phase) {
-                Ok(_) => self.add_log("Bought Kevlar + Helmet!".into()),
+                Ok(_) => {
+                    self.add_log("Bought Kevlar + Helmet!".into());
+                    if let Some(s) = &self.sound { s.buy_ok(); }
+                }
                 Err(e) => self.add_log(format!("Armor: {}", e)),
             }
         }
@@ -423,6 +499,10 @@ impl PlayApp {
                         self.add_log(format!("{} killed {}{} with {}", bot_name, victim_name, hs_s, weapon));
                         let hz = if is_hs { HitZone::Head } else { HitZone::Chest };
                         self.game.record_kill(&bot_id, &victim_id, &weapon, hz, is_hs, ts).ok();
+                        // Play kill sound if victim is the human player
+                        if victim_id == self.player_id {
+                            if let Some(s) = &self.sound { s.round_lose(); }
+                        }
                     } else {
                         let hp = self.game.players.get(&victim_id).map(|p| p.health).unwrap_or(0);
                         self.add_log(format!("{} hit {} for {:.0} ({} HP)", bot_name, victim_name, damage, hp));
@@ -497,6 +577,20 @@ impl PlayApp {
                     };
                     self.add_log(format!("=== {} === Score CT:{} T:{}",
                         result_msg, self.game.score.ct, self.game.score.t));
+                    // Round-end sound
+                    let player_team = self.player().map(|p| p.team).unwrap_or(Team::Spectator);
+                    let won = matches!((result, player_team),
+                        (RoundResult::CTWin(_), Team::CT) | (RoundResult::TWin(_), Team::T));
+                    if let Some(s) = &self.sound {
+                        // Bomb explode sound takes priority on TWin/BombExploded
+                        if matches!(result, RoundResult::TWin(game_cs::game::types::TWinReason::BombExploded)) {
+                            s.bomb_explode();
+                        } else if won {
+                            s.round_win();
+                        } else {
+                            s.round_lose();
+                        }
+                    }
                     self.screen = PlayScreen::RoundEnd(result, mvp_name);
                     self.round_end_acc = 0.0;
                 } else {
@@ -508,13 +602,23 @@ impl PlayApp {
                     if self.game.round_number > old_round {
                         self.add_log("Buy phase — use [B] to open buy menu".into());
                     }
-                    // Bomb status messages
+                    // Bomb status messages + beep
                     let bp = self.bomb_phase();
                     if bp == BombPhase::Planted {
                         if self.tick % 60 == 0 {
                             let t = self.game.current_round.as_ref().map(|r| r.bomb.timer_secs).unwrap_or(0.0);
                             self.add_log(format!("*** BOMB PLANTED — {:.0}s remaining! ***", t));
                         }
+                        // Bomb beep: frequency increases as timer runs down
+                        let bomb_t = self.game.current_round.as_ref().map(|r| r.bomb.timer_secs).unwrap_or(999.0);
+                        let beep_interval = if bomb_t < 5.0 { 0.3 } else if bomb_t < 15.0 { 0.7 } else { 1.5 };
+                        self.last_bomb_tick += dt;
+                        if self.last_bomb_tick >= beep_interval {
+                            self.last_bomb_tick = 0.0;
+                            if let Some(s) = &self.sound { s.bomb_beep(); }
+                        }
+                    } else {
+                        self.last_bomb_tick = 0.0;
                     }
                 }
             }
@@ -549,7 +653,7 @@ impl PlayApp {
                         KeyCode::Left  | KeyCode::Char('h') => { self.buy_cat = self.buy_cat.saturating_sub(1); self.buy_sel = 0; }
                         KeyCode::Right | KeyCode::Char('l') => { self.buy_cat = (self.buy_cat + 1).min(BUY_CATS.len()-1); self.buy_sel = 0; }
                         KeyCode::Enter => self.action_buy(),
-                        KeyCode::Char('k') => self.action_buy_kit(),
+                        KeyCode::Char('K') => self.action_buy_kit(),   // shift-K = buy kit
                         KeyCode::Char('a') | KeyCode::Char('A') => self.action_buy_armor(),
                         KeyCode::Esc | KeyCode::Char('b') | KeyCode::Char('B') => self.buy_open = false,
                         _ => {}
@@ -560,9 +664,14 @@ impl PlayApp {
                         KeyCode::Char('g') | KeyCode::Char('G') => self.action_throw_nade(),
                         KeyCode::Char('p') | KeyCode::Char('P') => self.action_plant(),
                         KeyCode::Char('d') | KeyCode::Char('D') => self.action_defuse(),
+                        KeyCode::Char('m') | KeyCode::Char('M') => self.map_view = !self.map_view,
                         KeyCode::Char('b') | KeyCode::Char('B') => {
-                            if self.round_phase() == RoundPhase::FreezeTime { self.buy_open = true; }
-                            else { self.add_log("Buy only available during freeze time!".into()); }
+                            if self.round_phase() == RoundPhase::FreezeTime {
+                                self.buy_open = true;
+                                self.map_view = false;
+                            } else {
+                                self.add_log("Buy only available during freeze time!".into());
+                            }
                         }
                         KeyCode::Char('q') | KeyCode::Char('Q') => return true,
                         _ => {}
@@ -762,6 +871,8 @@ fn draw_in_round(f: &mut Frame, app: &PlayApp) {
     draw_character_model(f, cols[0], app);
     if app.buy_open {
         draw_buy(f, cols[1], app);
+    } else if app.map_view {
+        draw_minimap(f, cols[1], app);
     } else {
         draw_log(f, cols[1], app);
     }
@@ -978,6 +1089,7 @@ fn draw_bottom(f: &mut Frame, area: Rect, app: &PlayApp) {
         if team == Team::T { acts.push("[P]Plant"); }
         if team == Team::CT && bp == BombPhase::Planted { acts.push("[D]Defuse"); }
         if phase == RoundPhase::FreezeTime { acts.push("[B]Buy"); }
+        acts.push("[M]Map");
         format!("{}  |  [Q]Quit", acts.join("  "))
     };
 
@@ -996,6 +1108,125 @@ fn draw_bottom(f: &mut Frame, area: Rect, app: &PlayApp) {
         ]).block(panel("PLAYER", C_BORDER)),
         rows[1],
     );
+}
+
+// ── Tactical minimap ──────────────────────────────────────────────────────────
+fn draw_minimap(f: &mut Frame, area: Rect, app: &PlayApp) {
+    // Outer border + title
+    let block = panel("TACTICAL MAP  [M] to close", C_CT);
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    if inner.width < 4 || inner.height < 4 { return; }
+
+    let cols = inner.width  as usize;
+    let rows = inner.height as usize;
+
+    // Build character grid — (char, Color)
+    let mut grid: Vec<Vec<(&'static str, Color)>> = vec![vec![("·", C_DIM); cols]; rows];
+
+    // ── Background: mark spawn zones with faint labels ─────────────────────
+    // CT spawn area: x≈200-430, y≈2748-2820  (top-right of map)
+    {
+        let (c1, r1) = world_to_map(200.0, 2820.0, cols, rows);
+        let (c2, r2) = world_to_map(430.0, 2748.0, cols, rows);
+        for r in r1..=r2.min(rows-1) {
+            for c in c1..=c2.min(cols-1) {
+                grid[r][c] = ("░", Color::Rgb(30, 50, 80));
+            }
+        }
+    }
+    // T spawn area: x≈-1640 to -1400, y≈500-580  (bottom-left of map)
+    {
+        let (c1, r1) = world_to_map(-1640.0, 580.0, cols, rows);
+        let (c2, r2) = world_to_map(-1400.0, 500.0, cols, rows);
+        for r in r1..=r2.min(rows-1) {
+            for c in c1..=c2.min(cols-1) {
+                grid[r][c] = ("░", Color::Rgb(80, 30, 30));
+            }
+        }
+    }
+
+    // ── Bomb sites ────────────────────────────────────────────────────────────
+    for site in &app.game.map.bomb_sites {
+        let (c1, r1) = world_to_map(site.bounds.min.x, site.bounds.max.y, cols, rows);
+        let (c2, r2) = world_to_map(site.bounds.max.x, site.bounds.min.y, cols, rows);
+        let (fill_ch, fill_col, border_col) = if site.label == 'A' {
+            ("▒", Color::Rgb(0, 80, 30), Color::Rgb(0, 200, 80))
+        } else {
+            ("▒", Color::Rgb(80, 20, 0),  Color::Rgb(220, 60, 60))
+        };
+        // Fill site area
+        for r in r1..=r2.min(rows-1) {
+            for c in c1..=c2.min(cols-1) {
+                grid[r][c] = (fill_ch, fill_col);
+            }
+        }
+        // Site label at center
+        let cx = (c1 + c2) / 2;
+        let cy = (r1 + r2) / 2;
+        if cy < rows && cx < cols {
+            let label: &'static str = if site.label == 'A' { "A" } else { "B" };
+            grid[cy][cx] = (label, border_col);
+        }
+    }
+
+    // ── Bomb position ─────────────────────────────────────────────────────────
+    let bp = app.bomb_phase();
+    if matches!(bp, BombPhase::Planted | BombPhase::Defusing | BombPhase::Planting) {
+        if let Some(pos) = app.game.current_round.as_ref().and_then(|r| r.bomb.position) {
+            let (c, r) = world_to_map(pos.x, pos.y, cols, rows);
+            if r < rows && c < cols {
+                grid[r][c] = ("★", C_ACCENT);
+            }
+        }
+    }
+
+    // ── Players ───────────────────────────────────────────────────────────────
+    for player in app.game.players.values() {
+        let pos = player.position;
+        let (c, r) = world_to_map(pos.x, pos.y, cols, rows);
+        if r >= rows || c >= cols { continue; }
+
+        let is_you = player.profile.id == app.player_id;
+        let (ch, col): (&'static str, Color) = if !player.is_alive() {
+            ("×", C_DIM)
+        } else if is_you {
+            ("@", C_ACCENT)
+        } else if player.team == Team::CT {
+            ("C", C_CT)
+        } else {
+            ("T", C_T)
+        };
+        grid[r][c] = (ch, col);
+    }
+
+    // ── Legend (right-most column area) ───────────────────────────────────────
+    let legend: &[(&str, Color, &str)] = &[
+        ("@", C_ACCENT,            " You"),
+        ("C", C_CT,                " CT"),
+        ("T", C_T,                 " T"),
+        ("A", Color::Rgb(0,200,80)," Site A"),
+        ("B", Color::Rgb(220,60,60)," Site B"),
+        ("★", C_ACCENT,            " Bomb"),
+        ("×", C_DIM,               " Dead"),
+    ];
+
+    // ── Render grid ───────────────────────────────────────────────────────────
+    let lines: Vec<Line> = grid.into_iter().enumerate().map(|(ri, row)| {
+        let mut spans: Vec<Span> = row.into_iter()
+            .map(|(ch, col)| Span::styled(ch, Style::default().fg(col)))
+            .collect();
+        // Append legend items on right side
+        if let Some((sym, col, lbl)) = legend.get(ri) {
+            spans.push(Span::styled("  ", Style::default()));
+            spans.push(Span::styled(*sym, Style::default().fg(*col).add_modifier(Modifier::BOLD)));
+            spans.push(Span::styled(*lbl, Style::default().fg(C_DIM)));
+        }
+        Line::from(spans)
+    }).collect();
+
+    f.render_widget(Paragraph::new(lines), inner);
 }
 
 // ── Round end ─────────────────────────────────────────────────────────────────
