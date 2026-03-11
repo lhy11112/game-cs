@@ -686,6 +686,63 @@ fn draw_team_select(f: &mut Frame, _app: &PlayApp) {
     );
 }
 
+// ── Character model ───────────────────────────────────────────────────────────
+fn draw_character_model(f: &mut Frame, area: Rect, app: &PlayApp) {
+    let alive  = app.player_alive();
+    let team   = app.player().map(|p| p.team).unwrap_or(Team::CT);
+    let hp     = app.player().map(|p| p.health).unwrap_or(0);
+    let scoped = app.scoped;
+
+    let body_color = if hp > 60 { C_GREEN } else if hp > 30 { C_ACCENT } else { C_HP };
+    let head_color = if team == Team::CT { C_CT } else { C_T };
+
+    let (title, border_color, lines): (&str, Color, Vec<Line>) = if !alive {
+        ("✗ DEAD", C_DIM, vec![
+            Line::from(""),
+            Line::from(Span::styled(" _______ ", Style::default().fg(C_DIM))),
+            Line::from(Span::styled("/x     x\\", Style::default().fg(C_DIM))),
+            Line::from(Span::styled("\\___+___/", Style::default().fg(C_DIM))),
+            Line::from(Span::styled("  /___\\  ", Style::default().fg(C_DIM))),
+            Line::from(Span::styled(" / RIP \\ ", Style::default().fg(C_HP).add_modifier(Modifier::BOLD))),
+            Line::from(Span::styled("/________\\", Style::default().fg(C_DIM))),
+            Line::from(""),
+        ])
+    } else if team == Team::CT {
+        let eyes = if scoped { "|(*)  o|" } else { "| o  o |" };
+        ("◉ CT", C_CT, vec![
+            Line::from(Span::styled("  _____  ", Style::default().fg(head_color))),
+            Line::from(Span::styled(eyes,       Style::default().fg(head_color))),
+            Line::from(Span::styled("|=_CT_=|", Style::default().fg(head_color).add_modifier(Modifier::BOLD))),
+            Line::from(Span::styled(" _|   |_ ", Style::default().fg(body_color))),
+            Line::from(Span::styled("/=|   |=\\", Style::default().fg(body_color))),
+            Line::from(Span::styled("  |   |  ", Style::default().fg(body_color))),
+            Line::from(Span::styled("  |___|  ", Style::default().fg(body_color))),
+            Line::from(Span::styled("  /   \\  ", Style::default().fg(body_color))),
+            Line::from(Span::styled(" /     \\ ", Style::default().fg(body_color))),
+        ])
+    } else {
+        let eyes = if scoped { "#x}  x##" } else { "## x  x#" };
+        ("◉ T", C_T, vec![
+            Line::from(Span::styled(" /####\\ ", Style::default().fg(head_color))),
+            Line::from(Span::styled(eyes,       Style::default().fg(head_color))),
+            Line::from(Span::styled("\\__T__/ ", Style::default().fg(head_color).add_modifier(Modifier::BOLD))),
+            Line::from(Span::styled(" _|   |_ ", Style::default().fg(body_color))),
+            Line::from(Span::styled("/=|   |=\\", Style::default().fg(body_color))),
+            Line::from(Span::styled("  |   |  ", Style::default().fg(body_color))),
+            Line::from(Span::styled("  |___|  ", Style::default().fg(body_color))),
+            Line::from(Span::styled("  /   \\  ", Style::default().fg(body_color))),
+            Line::from(Span::styled(" /     \\ ", Style::default().fg(body_color))),
+        ])
+    };
+
+    f.render_widget(
+        Paragraph::new(lines)
+            .block(panel(title, border_color))
+            .alignment(Alignment::Center),
+        area,
+    );
+}
+
 // ── In-round ──────────────────────────────────────────────────────────────────
 fn draw_in_round(f: &mut Frame, app: &PlayApp) {
     let area = f.area();
@@ -697,13 +754,18 @@ fn draw_in_round(f: &mut Frame, app: &PlayApp) {
 
     draw_hud_bar(f, rows[0], app);
 
-    let cols = Layout::horizontal([Constraint::Fill(1), Constraint::Length(32)]).split(rows[1]);
+    let cols = Layout::horizontal([
+        Constraint::Length(18),
+        Constraint::Fill(1),
+        Constraint::Length(32),
+    ]).split(rows[1]);
+    draw_character_model(f, cols[0], app);
     if app.buy_open {
-        draw_buy(f, cols[0], app);
+        draw_buy(f, cols[1], app);
     } else {
-        draw_log(f, cols[0], app);
+        draw_log(f, cols[1], app);
     }
-    draw_teams(f, cols[1], app);
+    draw_teams(f, cols[2], app);
 
     draw_bottom(f, rows[2], app);
 }
